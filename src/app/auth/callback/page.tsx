@@ -8,13 +8,21 @@ export default function AuthCallback() {
   const router = useRouter();
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session) {
+        subscription.unsubscribe();
         router.replace('/');
-      } else {
+      } else if (event === 'INITIAL_SESSION') {
+        subscription.unsubscribe();
         router.replace('/');
       }
     });
+
+    const timeout = setTimeout(() => router.replace('/'), 4000);
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timeout);
+    };
   }, [router]);
 
   return (
@@ -22,6 +30,7 @@ export default function AuthCallback() {
       <div className="flex flex-col items-center gap-4">
         <span className="text-4xl">🌿</span>
         <div className="w-7 h-7 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" />
+        <p className="text-white/30 text-xs">Signing you in...</p>
       </div>
     </div>
   );
