@@ -4,36 +4,45 @@ import { createContext, useContext, useEffect, useState, useCallback, ReactNode 
 import { Habit, HabitLog } from './types';
 import { getTodayString } from './utils';
 import { supabase } from './supabase';
-import type { User } from '@supabase/supabase-js';
+
+const SYNC_KEY_STORAGE = 'habitly-sync-key';
+
+function getSyncKey(): string {
+  let key = localStorage.getItem(SYNC_KEY_STORAGE);
+  if (!key) {
+    key = crypto.randomUUID();
+    localStorage.setItem(SYNC_KEY_STORAGE, key);
+  }
+  return key;
+}
 
 interface StoreContextType {
   habits: Habit[];
   logs: HabitLog[];
-  user: User | null;
   loading: boolean;
+  syncKey: string;
   addHabit: (habit: Omit<Habit, 'id' | 'createdAt'>) => Promise<void>;
   updateHabit: (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => Promise<void>;
   deleteHabit: (id: string) => Promise<void>;
   toggleHabit: (habitId: string) => Promise<void>;
   isCompletedToday: (habitId: string) => boolean;
   todayCompletionCount: number;
-  signOut: () => Promise<void>;
+  importSyncKey: (key: string) => void;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [logs, setLogs] = useState<HabitLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncKey, setSyncKey] = useState('');
 
-  const loadData = useCallback(async (userId: string) => {
+  const loadData = useCallback(async (key: string) => {
     const [habitsRes, logsRes] = await Promise.all([
-      supabase.from('habits').select('*').eq('user_id', userId).order('created_at'),
-      supabase.from('habit_logs').select('*').eq('user_id', userId),
+      supabase.from('habits').select('*').eq('sync_key', key).order('created_at'),
+      supabase.from('habit_logs').select('*').eq('sync_key', key),
     ]);
-
     if (habitsRes.data) {
       setHabits(habitsRes.data.map(h => ({
         id: h.id,
@@ -44,68 +53,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         createdAt: h.created_at,
       })));
     }
-
     if (logsRes.data) {
-      setLogs(logsRes.data.map(l => ({
-        habitId: l.habit_id,
-        date: l.date,
-      })));
+      setLogs(logsRes.data.map(l => ({ habitId: l.habit_id, date: l.date })));
     }
   }, []);
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        try {
-          await loadData(session.user.id);
-        } catch {
-          // ignore load errors
-        }
-      } else {
-        setHabits([]);
-        setLogs([]);
-      }
-      setLoading(false);
-    });
-
-    // Trigger initial session check
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) setLoading(false);
-    });
-
-    return () => subscription.unsubscribe();
+    const key = getSyncKey();
+    setSyncKey(key);
+    loadData(key).finally(() => setLoading(false));
   }, [loadData]);
 
+  const importSyncKey = (key: string) => {
+    const trimmed = key.trim();
+    if (!trimmed) return;
+    localStorage.setItem(SYNC_KEY_STORAGE, trimmed);
+    setSyncKey(trimmed);
+    setLoading(true);
+    loadData(trimmed).finally(() => setLoading(false));
+  };
+
   const addHabit = async (habit: Omit<Habit, 'id' | 'createdAt'>) => {
-    if (!user) return;
     const { data } = await supabase.from('habits').insert({
-      user_id: user.id,
+      sync_key: syncKey,
       name: habit.name,
       emoji: habit.emoji,
       color: habit.color,
       category: habit.category,
     }).select().single();
-
     if (data) {
       setHabits(prev => [...prev, {
-        id: data.id,
-        name: data.name,
-        emoji: data.emoji,
-        color: data.color,
-        category: data.category,
-        createdAt: data.created_at,
+        id: data.id, name: data.name, emoji: data.emoji,
+        color: data.color, category: data.category, createdAt: data.created_at,
       }]);
     }
   };
 
   const updateHabit = async (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => {
-    await supabase.from('habits').update({
-      name: updates.name,
-      emoji: updates.emoji,
-      color: updates.color,
-      category: updates.category,
-    }).eq('id', id);
+    await supabase.from('habits').update(updates).eq('id', id);
     setHabits(prev => prev.map(h => h.id === id ? { ...h, ...updates } : h));
   };
 
@@ -116,22 +101,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const toggleHabit = async (habitId: string) => {
-    if (!user) return;
     const today = getTodayString();
     const exists = logs.some(l => l.habitId === habitId && l.date === today);
-
     if (exists) {
       await supabase.from('habit_logs').delete()
-        .eq('habit_id', habitId)
-        .eq('date', today)
-        .eq('user_id', user.id);
+        .eq('habit_id', habitId).eq('date', today).eq('sync_key', syncKey);
       setLogs(prev => prev.filter(l => !(l.habitId === habitId && l.date === today)));
     } else {
-      await supabase.from('habit_logs').insert({
-        habit_id: habitId,
-        user_id: user.id,
-        date: today,
-      });
+      await supabase.from('habit_logs').insert({ habit_id: habitId, sync_key: syncKey, date: today });
       setLogs(prev => [...prev, { habitId, date: today }]);
     }
   };
@@ -143,17 +120,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const todayCompletionCount = habits.filter(h => isCompletedToday(h.id)).length;
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    setHabits([]);
-    setLogs([]);
-  };
-
   return (
     <StoreContext.Provider value={{
-      habits, logs, user, loading,
+      habits, logs, loading, syncKey,
       addHabit, updateHabit, deleteHabit, toggleHabit,
-      isCompletedToday, todayCompletionCount, signOut,
+      isCompletedToday, todayCompletionCount, importSyncKey,
     }}>
       {children}
     </StoreContext.Provider>
