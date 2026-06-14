@@ -1,109 +1,137 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react';
 import { Habit, HabitLog } from './types';
-import { generateId, getTodayString } from './utils';
+import { getTodayString } from './utils';
+import { supabase } from './supabase';
+import type { User } from '@supabase/supabase-js';
 
 interface StoreContextType {
   habits: Habit[];
   logs: HabitLog[];
-  addHabit: (habit: Omit<Habit, 'id' | 'createdAt'>) => void;
-  updateHabit: (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => void;
-  deleteHabit: (id: string) => void;
-  toggleHabit: (habitId: string) => void;
+  user: User | null;
+  loading: boolean;
+  addHabit: (habit: Omit<Habit, 'id' | 'createdAt'>) => Promise<void>;
+  updateHabit: (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => Promise<void>;
+  deleteHabit: (id: string) => Promise<void>;
+  toggleHabit: (habitId: string) => Promise<void>;
   isCompletedToday: (habitId: string) => boolean;
   todayCompletionCount: number;
+  signOut: () => Promise<void>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
 
-const STORAGE_KEY = 'habitly-v1';
-
-const DEMO_HABITS: Habit[] = [
-  {
-    id: 'demo-1',
-    name: 'Morning Walk',
-    emoji: '🌅',
-    color: '#10B981',
-    category: 'fitness',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'demo-2',
-    name: 'Read 30 Minutes',
-    emoji: '📚',
-    color: '#8B5CF6',
-    category: 'learning',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'demo-3',
-    name: 'Drink 8 Glasses of Water',
-    emoji: '💧',
-    color: '#06B6D4',
-    category: 'health',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'demo-4',
-    name: 'Meditate',
-    emoji: '🧘',
-    color: '#EC4899',
-    category: 'mindfulness',
-    createdAt: new Date().toISOString(),
-  },
-];
-
 export function StoreProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [logs, setLogs] = useState<HabitLog[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        setHabits(data.habits || []);
-        setLogs(data.logs || []);
-      } else {
-        setHabits(DEMO_HABITS);
-        setLogs([]);
-      }
-    } catch {
-      setHabits(DEMO_HABITS);
-      setLogs([]);
+  const loadData = useCallback(async (userId: string) => {
+    const [habitsRes, logsRes] = await Promise.all([
+      supabase.from('habits').select('*').eq('user_id', userId).order('created_at'),
+      supabase.from('habit_logs').select('*').eq('user_id', userId),
+    ]);
+
+    if (habitsRes.data) {
+      setHabits(habitsRes.data.map(h => ({
+        id: h.id,
+        name: h.name,
+        emoji: h.emoji,
+        color: h.color,
+        category: h.category,
+        createdAt: h.created_at,
+      })));
     }
-    setLoaded(true);
+
+    if (logsRes.data) {
+      setLogs(logsRes.data.map(l => ({
+        habitId: l.habit_id,
+        date: l.date,
+      })));
+    }
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ habits, logs }));
-  }, [habits, logs, loaded]);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadData(session.user.id).finally(() => setLoading(false));
+      } else {
+        setLoading(false);
+      }
+    });
 
-  const addHabit = (habit: Omit<Habit, 'id' | 'createdAt'>) => {
-    setHabits(prev => [
-      ...prev,
-      { ...habit, id: generateId(), createdAt: new Date().toISOString() },
-    ]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        await loadData(session.user.id);
+      } else {
+        setHabits([]);
+        setLogs([]);
+      }
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [loadData]);
+
+  const addHabit = async (habit: Omit<Habit, 'id' | 'createdAt'>) => {
+    if (!user) return;
+    const { data } = await supabase.from('habits').insert({
+      user_id: user.id,
+      name: habit.name,
+      emoji: habit.emoji,
+      color: habit.color,
+      category: habit.category,
+    }).select().single();
+
+    if (data) {
+      setHabits(prev => [...prev, {
+        id: data.id,
+        name: data.name,
+        emoji: data.emoji,
+        color: data.color,
+        category: data.category,
+        createdAt: data.created_at,
+      }]);
+    }
   };
 
-  const updateHabit = (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => {
-    setHabits(prev => prev.map(h => (h.id === id ? { ...h, ...updates } : h)));
+  const updateHabit = async (id: string, updates: Partial<Omit<Habit, 'id' | 'createdAt'>>) => {
+    await supabase.from('habits').update({
+      name: updates.name,
+      emoji: updates.emoji,
+      color: updates.color,
+      category: updates.category,
+    }).eq('id', id);
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, ...updates } : h));
   };
 
-  const deleteHabit = (id: string) => {
+  const deleteHabit = async (id: string) => {
+    await supabase.from('habits').delete().eq('id', id);
     setHabits(prev => prev.filter(h => h.id !== id));
     setLogs(prev => prev.filter(l => l.habitId !== id));
   };
 
-  const toggleHabit = (habitId: string) => {
+  const toggleHabit = async (habitId: string) => {
+    if (!user) return;
     const today = getTodayString();
     const exists = logs.some(l => l.habitId === habitId && l.date === today);
+
     if (exists) {
+      await supabase.from('habit_logs').delete()
+        .eq('habit_id', habitId)
+        .eq('date', today)
+        .eq('user_id', user.id);
       setLogs(prev => prev.filter(l => !(l.habitId === habitId && l.date === today)));
     } else {
+      await supabase.from('habit_logs').insert({
+        habit_id: habitId,
+        user_id: user.id,
+        date: today,
+      });
       setLogs(prev => [...prev, { habitId, date: today }]);
     }
   };
@@ -115,27 +143,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const todayCompletionCount = habits.filter(h => isCompletedToday(h.id)).length;
 
-  if (!loaded) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="w-8 h-8 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" />
-      </div>
-    );
-  }
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    setHabits([]);
+    setLogs([]);
+  };
 
   return (
-    <StoreContext.Provider
-      value={{
-        habits,
-        logs,
-        addHabit,
-        updateHabit,
-        deleteHabit,
-        toggleHabit,
-        isCompletedToday,
-        todayCompletionCount,
-      }}
-    >
+    <StoreContext.Provider value={{
+      habits, logs, user, loading,
+      addHabit, updateHabit, deleteHabit, toggleHabit,
+      isCompletedToday, todayCompletionCount, signOut,
+    }}>
       {children}
     </StoreContext.Provider>
   );

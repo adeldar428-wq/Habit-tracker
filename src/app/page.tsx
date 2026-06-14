@@ -6,13 +6,24 @@ import { HabitCard } from '@/components/HabitCard';
 import { HabitModal } from '@/components/HabitModal';
 import { Header } from '@/components/Header';
 import { EmptyState } from '@/components/EmptyState';
+import { LoginScreen } from '@/components/LoginScreen';
 import { Habit, Category, CATEGORIES } from '@/lib/types';
 
 export default function Home() {
-  const { habits } = useStore();
+  const { habits, user, loading } = useStore();
   const [showModal, setShowModal] = useState(false);
   const [editingHabit, setEditingHabit] = useState<Habit | null>(null);
   const [activeCategory, setActiveCategory] = useState<Category | 'all'>('all');
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="w-8 h-8 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) return <LoginScreen />;
 
   const usedCategories = Array.from(new Set(habits.map(h => h.category)));
   const showFilter = usedCategories.length > 1;
@@ -45,7 +56,6 @@ export default function Home() {
         <EmptyState onAddHabit={handleAdd} />
       ) : (
         <div className="px-4 mt-4">
-          {/* Category filter pills */}
           {showFilter && (
             <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1 mb-4 -mx-1 px-1">
               <CategoryPill
@@ -69,7 +79,6 @@ export default function Home() {
             </div>
           )}
 
-          {/* Habits grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {filteredHabits.map(habit => (
               <HabitCard key={habit.id} habit={habit} onEdit={handleEdit} />
@@ -92,10 +101,7 @@ export default function Home() {
 }
 
 function CategoryPill({
-  label,
-  emoji,
-  active,
-  onClick,
+  label, emoji, active, onClick,
 }: {
   label: string;
   emoji?: string;
