@@ -57,12 +57,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        await loadData(session.user.id);
+        try {
+          await loadData(session.user.id);
+        } catch {
+          // ignore load errors
+        }
       } else {
         setHabits([]);
         setLogs([]);
       }
       setLoading(false);
+    });
+
+    // Trigger initial session check
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) setLoading(false);
     });
 
     return () => subscription.unsubscribe();
